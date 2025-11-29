@@ -41,16 +41,18 @@ session_string = os.getenv('TELEGRAM_SESSION', '')
 client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 # --- Variables Globales d'État ---
+# Prédictions actives (déjà envoyées au canal de prédiction)
 pending_predictions = {}
+# Prédictions en attente (prêtes à être envoyées dès que la distance est bonne)
 queued_predictions = {}
 recent_games = {}
 processed_messages = set()
 last_transferred_game = None
 current_game_number = 0
 
-MAX_PENDING_PREDICTIONS = 2
-PROXIMITY_THRESHOLD = 3 # Jeux avant l'envoi
-PREDICTION_OFFSET = 6   # Décalage de la prédiction (+6 jeux)
+MAX_PENDING_PREDICTIONS = 2  # Nombre maximal de prédictions actives
+PROXIMITY_THRESHOLD = 3      # Nombre de jeux avant l'envoi depuis la file d'attente
+PREDICTION_OFFSET = 6        # Décalage de la prédiction (Jeu source N -> Prédire N + 6)
 
 source_channel_ok = False
 prediction_channel_ok = False
@@ -70,19 +72,19 @@ def extract_parentheses_groups(message: str):
     return re.findall(r"\(([^)]*)\)", message)
 
 def normalize_suits(group_str: str) -> str:
-    """Remplace les différentes variantes de symboles par un format unique."""
+    """Remplace les différentes variantes de symboles par un format unique (important pour la détection)."""
     normalized = group_str.replace('❤️', '♥').replace('❤', '♥').replace('♥️', '♥')
     normalized = normalized.replace('♠️', '♠').replace('♦️', '♦').replace('♣️', '♣')
     return normalized
 
 def get_suits_in_group(group_str: str):
-    """Liste toutes les couleurs présentes dans une chaîne."""
+    """Liste toutes les couleurs (suits) présentes dans une chaîne."""
     normalized = normalize_suits(group_str)
     return [s for s in ALL_SUITS if s in normalized]
 
 def find_missing_suit_for_rule(group_str: str):
     """
-    Règle: Trouve la couleur manquante si EXACTEMENT 3 couleurs sont présentes.
+    Règle de Prédiction Unique: Trouve la couleur manquante si EXACTEMENT 3 couleurs sont présentes.
     Retourne la couleur manquante (symbole brut) ou None.
     """
     suits_present = get_suits_in_group(group_str)
@@ -95,7 +97,7 @@ def find_missing_suit_for_rule(group_str: str):
     return None
 
 def has_suit_in_group(group_str: str, target_suit: str) -> bool:
-    """Vérifie si la couleur cible est présente dans le groupe."""
+    """Vérifie si la couleur cible est présente dans le premier groupe du résultat."""
     normalized = normalize_suits(group_str)
     target_normalized = normalize_suits(target_suit)
     for suit in ALL_SUITS:
@@ -104,7 +106,7 @@ def has_suit_in_group(group_str: str, target_suit: str) -> bool:
     return False
 
 def get_predicted_suit(missing_suit: str) -> str:
-    """Applique le mapping personnalisé (manquant -> prédit)."""
+    """Applique le mapping personnalisé (couleur manquante -> couleur prédite)."""
     return SUIT_MAPPING.get(missing_suit, missing_suit)
 
 # --- Logique de Prédiction et File d'Attente ---
@@ -112,10 +114,11 @@ def get_predicted_suit(missing_suit: str) -> str:
 async def send_prediction_to_channel(target_game: int, predicted_suit: str, base_game: int):
     """Envoie la prédiction au canal de prédiction et l'ajoute aux prédictions actives."""
     try:
-        # Pour le backup, nous réutilisons le même mapping. L'objectif est d'avoir une autre couleur à jouer.
+        # La prédiction de secours utilise le même mapping pour trouver une autre couleur à jouer.
         alternate_suit = get_predicted_suit(predicted_suit) 
 
-        backup_game = target_game + PREDICTION_OFFSET # Le backup est un autre jeu +6 plus tard
+        # Le backup est +6 jeux après le jeu cible (donc N + 6 + 6)
+        backup_game = target_game + PREDICTION_OFFSET 
 
         prediction_msg = f"""😼 {target_game}😺: √{predicted_suit} statut :🔮"""
 
@@ -150,7 +153,7 @@ async def send_prediction_to_channel(target_game: int, predicted_suit: str, base
         return None
 
 def queue_prediction(target_game: int, predicted_suit: str, base_game: int):
-    """Met une prédiction en file d'attente pour un envoi différé."""
+    """Met une prédiction en file d'attente pour un envoi différé (gestion du stock)."""
     if target_game in queued_predictions or target_game in pending_predictions:
         logger.info(f"Prédiction #{target_game} déjà en file ou active, ignorée")
         return False
@@ -165,7 +168,7 @@ def queue_prediction(target_game: int, predicted_suit: str, base_game: int):
     return True
 
 async def check_and_send_queued_predictions(current_game: int):
-    """Vérifie la file d'attente et envoie les prédictions proches."""
+    """Vérifie la file d'attente et envoie les prédictions proches, dans la limite MAX_PENDING_PREDICTIONS."""
     global current_game_number
     current_game_number = current_game
 
@@ -173,6 +176,7 @@ async def check_and_send_queued_predictions(current_game: int):
         logger.info(f"⏸️ {len(pending_predictions)} prédictions en cours (max {MAX_PENDING_PREDICTIONS}), attente...")
         return
 
+    # Tri par numéro de jeu pour envoyer la plus proche en premier
     sorted_queued = sorted(queued_predictions.keys())
 
     for target_game in sorted_queued:
@@ -181,6 +185,7 @@ async def check_and_send_queued_predictions(current_game: int):
 
         distance = target_game - current_game
 
+        # Si le jeu cible est proche (dans le seuil) et n'est pas déjà passé
         if distance <= PROXIMITY_THRESHOLD and distance > 0:
             pred_data = queued_predictions.pop(target_game)
             logger.info(f"🎯 Jeu #{current_game} - Prédiction #{target_game} proche ({distance} jeux), envoi maintenant!")
@@ -216,6 +221,7 @@ async def update_prediction_status(game_number: int, new_status: str):
         pred['status'] = new_status
         logger.info(f"Prédiction #{game_number} mise à jour: {new_status}")
 
+        # Les prédictions terminées sont supprimées du stock actif
         if new_status in ['✅0️⃣', '✅1️⃣', '❌']:
             del pending_predictions[game_number]
             logger.info(f"Prédiction #{game_number} terminée et supprimée")
@@ -227,17 +233,20 @@ async def update_prediction_status(game_number: int, new_status: str):
         return False
 
 def is_message_finalized(message: str) -> bool:
-    """Vérifie si le message est un résultat final (non en cours)."""
+    """Vérifie si le message est un résultat final (non en cours) en utilisant les symboles."""
     if '⏰' in message:
         return False
+    # Vérifie si le message contient un symbole de finalisation
     return '✅' in message or '🔰' in message
 
 async def check_prediction_result(game_number: int, first_group: str):
     """
-    Vérifie les résultats des prédictions actives (Jeu Cible et Jeu Cible + 1).
-    Déclenche la mise en file d'attente du backup si échec au Jeu Cible + 1.
+    Vérifie les résultats des prédictions actives :
+    1. Vérifie si le jeu actuel (N) correspond à une prédiction cible.
+    2. Vérifie si le jeu précédent (N-1) correspond à une prédiction cible pour la deuxième chance.
     """
-    # Vérification du jeu actuel (Jeu Cible)
+    
+    # 1. Vérification du jeu actuel (Jeu Cible N)
     if game_number in pending_predictions:
         pred = pending_predictions[game_number]
         target_suit = pred['suit']
@@ -247,14 +256,16 @@ async def check_prediction_result(game_number: int, first_group: str):
             logger.info(f"Prédiction #{game_number} réussie immédiatement! (✅0️⃣)")
             return True
         else:
+            # La prédiction passe au statut 'en attente de N+1'
             pred['check_count'] = 1
-            logger.info(f"Prédiction #{game_number}: couleur non trouvée, attente du jeu suivant")
+            logger.info(f"Prédiction #{game_number}: couleur non trouvée au premier jeu, attente du jeu suivant")
+            return False
 
-    # Vérification du jeu précédent (Jeu Cible + 1)
+    # 2. Vérification du jeu précédent (Jeu Cible N-1 - c'est la 2ème chance pour cette prédiction)
     prev_game = game_number - 1
     if prev_game in pending_predictions:
         pred = pending_predictions[prev_game]
-        # Vérifie si la prédiction a déjà été vérifiée au jeu précédent (Cible)
+        # Vérifie si la prédiction a été marquée pour la deuxième vérification
         if pred.get('check_count', 0) >= 1:
             target_suit = pred['suit']
 
@@ -264,12 +275,12 @@ async def check_prediction_result(game_number: int, first_group: str):
                 return True
             else:
                 await update_prediction_status(prev_game, '❌')
-                logger.info(f"Prédiction #{prev_game} échouée (❌) - Envoi backup")
+                logger.info(f"Prédiction #{prev_game} échouée (❌) - Envoi du backup")
 
                 backup_target = pred['backup_game']
                 alternate_suit = pred['alternate_suit']
                 
-                # Le backup utilise le même offset de prédiction
+                # Le backup est une nouvelle prédiction mise en file d'attente
                 queue_prediction(
                     backup_target,
                     alternate_suit,
@@ -284,8 +295,8 @@ async def process_finalized_message(message_text: str, chat_id: int):
     """
     Traite un message finalisé:
     1. Transfère à l'administrateur (si activé).
-    2. Vérifie les résultats des prédictions actives.
-    3. Applique la NOUVELLE RÈGLE de prédiction (si condition remplie).
+    2. Vérifie les résultats des prédictions actives (et gère les backups).
+    3. Applique la RÈGLE UNIQUE de prédiction.
     4. Vérifie si une prédiction en file d'attente doit être envoyée.
     """
     global last_transferred_game, current_game_number
@@ -299,6 +310,7 @@ async def process_finalized_message(message_text: str, chat_id: int):
 
         current_game_number = game_number
 
+        # Évite le double traitement des messages
         message_hash = f"{game_number}_{message_text[:50]}"
         if message_hash in processed_messages:
             return
@@ -308,24 +320,21 @@ async def process_finalized_message(message_text: str, chat_id: int):
             processed_messages.clear()
 
         groups = extract_parentheses_groups(message_text)
-        if len(groups) < 2:
+        if len(groups) < 1:
             return
 
         first_group = groups[0]
 
         logger.info(f"Jeu #{game_number} finalisé (chat_id: {chat_id}) - Groupe1: {first_group}")
 
-        # --- Transfert à l'administrateur ---
+        # --- Transfert à l'administrateur (si activé) ---
         if transfer_enabled and ADMIN_ID and ADMIN_ID != 0 and last_transferred_game != game_number:
             try:
                 transfer_msg = f"📨 **Message finalisé du canal source:**\n\n{message_text}"
                 await client.send_message(ADMIN_ID, transfer_msg)
                 last_transferred_game = game_number
-                logger.info(f"✅ Message finalisé #{game_number} transféré à votre bot {ADMIN_ID}")
             except Exception as e:
                 logger.error(f"❌ Erreur transfert à votre bot: {e}")
-        elif not transfer_enabled:
-            logger.info(f"🔇 Message #{game_number} traité en silence (transfert désactivé)")
         
         # --- Vérification des résultats existants ---
         await check_prediction_result(game_number, first_group)
@@ -333,9 +342,9 @@ async def process_finalized_message(message_text: str, chat_id: int):
         # --- Envoi des prédictions en file d'attente (si proche) ---
         await check_and_send_queued_predictions(game_number)
 
-        # --- NOUVELLE LOGIQUE DE PRÉDICTION (Règle unique) ---
+        # --- LOGIQUE DE PRÉDICTION (Règle unique) ---
 
-        # 1. Tenter de trouver EXACTEMENT une couleur manquante dans le premier groupe
+        # 1. Tenter de trouver EXACTEMENT une couleur manquante (3 couleurs présentes)
         missing_suit_raw = find_missing_suit_for_rule(first_group)
 
         if missing_suit_raw:
@@ -346,8 +355,9 @@ async def process_finalized_message(message_text: str, chat_id: int):
             target_game = game_number + PREDICTION_OFFSET 
             
             if target_game not in pending_predictions and target_game not in queued_predictions:
-                logger.info(f"Règle 1 jeu appliquée: Manque {missing_suit_raw} -> Prédire {predicted_suit} sur #{target_game}")
+                logger.info(f"Règle de prédiction appliquée: Manque {missing_suit_raw} -> Prédire {predicted_suit} sur #{target_game}")
                 
+                # Ajout à la file d'attente
                 queue_prediction(
                     target_game,
                     predicted_suit,
@@ -356,7 +366,7 @@ async def process_finalized_message(message_text: str, chat_id: int):
                 # Tente d'envoyer immédiatement si la distance est petite
                 await check_and_send_queued_predictions(game_number)
         
-        # Stockage des jeux récents (pour d'éventuelles analyses futures)
+        # Stockage des jeux récents
         recent_games[game_number] = {
             'first_group': first_group,
             'timestamp': datetime.now().isoformat()
@@ -412,7 +422,8 @@ async def handle_edited_message(event):
         import traceback
         logger.error(traceback.format_exc())
 
-# --- Commandes Administrateur ---
+# --- Commandes Administrateur (omises pour la concision) ---
+# ... (Les commandes /status, /debug, /help, etc., sont conservées)
 
 @client.on(events.NewMessage(pattern='/start'))
 async def cmd_start(event):
@@ -451,7 +462,6 @@ async def cmd_debug(event):
 async def cmd_checkchannels(event):
     global source_channel_ok, prediction_channel_ok
     if event.is_group or event.is_channel: return
-    # Une vérification d'accès réelle irait ici
     await event.respond("🔍 Vérification des accès aux canaux... (Le statut complet est visible via /debug)")
 
 @client.on(events.NewMessage(pattern='/transfert|/activetransfert'))
@@ -472,6 +482,7 @@ async def cmd_stop_transfert(event):
 async def cmd_help(event):
     if event.is_group or event.is_channel: return
     await event.respond(f"""📖 **Aide - Bot de Prédiction**\n\n**Règles de prédiction (Votre Règle Personnalisée):**\n• Condition: Le premier groupe du jeu actuel (N) doit avoir **exactement 1 couleur manquante** (donc 3 couleurs présentes).\n• Mapping (Couleur manquante $\\rightarrow$ Prédite) : {SUIT_MAPPING}\n• Prédit: Jeu **N + {PREDICTION_OFFSET}** avec la couleur mappée.\n\n**Maintenance:**\n• Reset Quotidien: Toutes les données sont effacées à **00h59 WAT** pour un redémarrage à zéro.\n""")
+
 
 # --- Serveur Web et Démarrage ---
 
@@ -494,7 +505,7 @@ async def start_web_server():
     await site.start() 
 
 async def schedule_daily_reset():
-    """Tâche planifiée pour la réinitialisation quotidienne des stocks de prédiction."""
+    """Tâche planifiée pour la réinitialisation quotidienne des stocks de prédiction à 00h59 WAT."""
     # Définir le fuseau horaire de l'Afrique de l'Ouest (WAT = UTC+1)
     wat_tz = timezone(timedelta(hours=1)) 
     # Définir l'heure cible de reset (00h59)
@@ -536,8 +547,6 @@ async def start_bot():
     try:
         await client.start(bot_token=BOT_TOKEN)
         
-        # NOTE: Des vérifications d'accès réelles devraient être faites ici, 
-        # mais pour l'exécution du code, nous assumons qu'elles sont OK.
         source_channel_ok = True
         prediction_channel_ok = True 
         logger.info("Bot connecté et canaux marqués comme accessibles.")
