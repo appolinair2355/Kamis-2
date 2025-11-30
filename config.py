@@ -1,46 +1,44 @@
+"""
+Configuration du bot Telegram de prédiction Baccarat
+"""
 import os
 
-# Fichier de configuration pour le Bot de Prédiction Baccarat
+def parse_channel_id(env_var: str, default: str) -> int:
+    value = os.getenv(env_var) or default
+    channel_id = int(value)
+    # Convertit l'ID positif en format ID de canal Telegram négatif si nécessaire
+    if channel_id > 0 and len(str(channel_id)) >= 10:
+        channel_id = -channel_id
+    return channel_id
 
-# --- Paramètres de Connexion Telegram (Chargement depuis les variables d'environnement) ---
-# Les valeurs statiques ci-dessous servent de 'placeholders' ou de valeurs par défaut
-# si les variables d'environnement ne sont pas définies.
-API_ID = int(os.getenv('API_ID', 1234567))
-API_HASH = os.getenv('API_HASH', 'VOTRE_API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN', 'VOTRE_BOT_TOKEN')
+# ID du canal source (inchangé)
+SOURCE_CHANNEL_ID = parse_channel_id('SOURCE_CHANNEL_ID', '-1002682552255')
 
-# Votre ID utilisateur Telegram (pour recevoir les transferts et utiliser les commandes admin)
-ADMIN_ID = int(os.getenv('ADMIN_ID', 1190237801))
+# NOUVEL ID DU CANAL DE PRÉDICTION (Baccara B)
+PREDICTION_CHANNEL_ID = parse_channel_id('PREDICTION_CHANNEL_ID', '-1003450873158')
 
-# --- Canaux ---
-# L'ID du canal source d'où proviennent les messages (ID de supergroupe doit être négatif)
-SOURCE_CHANNEL_ID = int(os.getenv('SOURCE_CHANNEL_ID', -1002682552255))
-# L'ID du canal de destination où les prédictions sont envoyées (ID de supergroupe doit être négatif)
-PREDICTION_CHANNEL_ID = int(os.getenv('PREDICTION_CHANNEL_ID', -1003450873158))
+ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
 
-# --- Paramètres du Serveur Web (pour le health check) ---
-PORT = int(os.getenv('PORT', 10000))
+API_ID = int(os.getenv('API_ID') or '0')
+API_HASH = os.getenv('API_HASH') or ''
+BOT_TOKEN = os.getenv('BOT_TOKEN') or ''
 
-# --- Logique de Prédiction Baccarat ---
+PORT = int(os.getenv('PORT') or '5000')  # Port 5000 for Replit
 
-# Toutes les couleurs utilisées (symboles normalisés)
-ALL_SUITS = ['♠', '♣', '♥', '♦']
-
-# MAPPING CRITIQUE : Manquante (KEY) -> Prédite (VALUE)
-# Ce mapping utilise UNIQUEMENT les symboles normalisés, car le code principal
-# gère la conversion des emojis ('❤️', '♠️', etc.) vers ces symboles.
+# NOUVEAU MAPPING : Échange des enseignes de même couleur (Noir/Noir et Rouge/Rouge)
+# Note : Les variantes multiples (♠️, ♥, etc.) du mapping précédent ont été retirées 
+# pour simplifier, car elles sont gérées par SUIT_DISPLAY et ALL_SUITS.
 SUIT_MAPPING = {
-    '♠': '♣',  # Pique manque -> Prédit Trèfle (Votre logique: ♠️ prédit ♣️)
-    '♣': '♠',  # Trèfle manque -> Prédit Pique (Votre logique: ♣️ prédit ♠️)
-    '♥': '♦',  # Cœur manque -> Prédit Carreau (Votre logique: ❤️ prédit ♦️)
-    '♦': '♥',  # Carreau manque -> Prédit Cœur (Votre logique: ♦️ prédit ❤️)
+    '♠': '♣',  # Pique manque -> Prédit Trèfle
+    '♣': '♠',  # Trèfle manque -> Prédit Pique
+    '♥': '♦',  # Cœur manque -> Prédit Carreau
+    '♦': '♥',  # Carreau manque -> Prédit Cœur
 }
 
-# Affichage des couleurs dans les messages (pour info)
-# Mappe le symbole normalisé vers la version emoji pour l'affichage Telegram.
+ALL_SUITS = ['♠', '♥', '♦', '♣']
 SUIT_DISPLAY = {
     '♠': '♠️',
-    '♣': '♣️',
     '♥': '❤️',
     '♦': '♦️',
+    '♣': '♣️'
 }
