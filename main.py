@@ -54,7 +54,7 @@ current_game_number = 0
 last_processed_game_data = None 
 
 MAX_PENDING_PREDICTIONS = 2  # Nombre maximal de prédictions actives
-PROXIMITY_THRESHOLD = 3      # Nombre de jeux avant l'envoi depuis la file d'attente
+PROXIMITY_THRESHOLD = 3      # Nombre de jeux avant l'envoi depuis la file d'attente (distance 3 ou 2)
 
 # ATTENTION: PREDICTION_OFFSET est désormais le décalage utilisé pour le backup (+6 après le jeu cible initial)
 # Nous utiliserons 'PREDICTION_DELAY = 5' pour aller de N+1 à N+6
@@ -161,31 +161,37 @@ def queue_prediction(target_game: int, predicted_suit: str, base_game: int):
 
 async def check_and_send_queued_predictions(current_game: int):
     """
-    Vérifie la file d'attente et envoie les prédictions proches, dans la limite MAX_PENDING_PREDICTIONS.
-    Garantit l'ordre grâce au tri de la file d'attente.
+    MODIFIÉ: Vérifie la file d'attente, applique la suppression stricte si la fenêtre d'envoi est manquée (distance <= 1),
+    puis envoie si la distance est de 2 ou 3 jeux et que le stock actif le permet (max 2).
     """
     global current_game_number
     current_game_number = current_game
-
-    if len(pending_predictions) >= MAX_PENDING_PREDICTIONS:
-        logger.info(f"⏸️ {len(pending_predictions)} prédictions en cours (max {MAX_PENDING_PREDICTIONS}), attente...")
-        # Continue pour nettoyer les expirées même si le stock est plein
-        pass
 
     # Tri par numéro de jeu pour envoyer la plus proche en premier (GARANTIT L'ORDRE)
     sorted_queued = sorted(queued_predictions.keys())
 
     for target_game in sorted_queued:
         
-        # On vérifie à nouveau si le stock actif est plein AVANT l'envoi
-        if len(pending_predictions) >= MAX_PENDING_PREDICTIONS:
-            # Si le stock est plein, on passe au jeu suivant SANS l'envoyer
-            continue 
-
         distance = target_game - current_game
 
-        # Si le jeu cible est proche (dans le seuil) et n'est pas déjà passé (distance > 0)
-        if distance <= PROXIMITY_THRESHOLD and distance > 0:
+        # --- NOUVELLE RÈGLE DE SUPPRESSION (DISTANCE 1 OU 0 MANQUÉE) ---
+        # Si la prédiction atteint la distance 1 ou 0 sans avoir été envoyée, elle est supprimée.
+        if distance <= 1: 
+            logger.warning(f"⚠️ Prédiction #{target_game} est à une distance {distance}. Fenêtre d'envoi manquée (devait être > 1). Supprimée.")
+            queued_predictions.pop(target_game, None)
+            continue # Passe au jeu suivant
+        
+        # --- RÈGLE D'ENVOI (DISTANCE 2 ou 3) ---
+        
+        # Vérifie si le stock actif est plein AVANT d'envoyer
+        if len(pending_predictions) >= MAX_PENDING_PREDICTIONS:
+            logger.info(f"⏸️ Stock actif plein ({len(pending_predictions)}/{MAX_PENDING_PREDICTIONS}), prédiction #{target_game} reste en file.")
+            # Si le stock est plein, on ne fait rien pour cette prédiction, on passe à la suivante
+            continue
+        
+        # Si le jeu cible est proche (3 ou 2 jeux) et que le stock est disponible
+        # PROXIMITY_THRESHOLD = 3 et distance > 1 garantit l'envoi uniquement pour distance 3 et 2.
+        if distance <= PROXIMITY_THRESHOLD and distance > 1: 
             pred_data = queued_predictions.pop(target_game)
             logger.info(f"🎯 Jeu #{current_game} - Prédiction #{target_game} proche ({distance} jeux), envoi maintenant!")
 
@@ -194,10 +200,9 @@ async def check_and_send_queued_predictions(current_game: int):
                 pred_data['predicted_suit'],
                 pred_data['base_game']
             )
-        elif distance <= 0:
-            # Suppression si la prédiction est expirée
-            logger.warning(f"⚠️ Prédiction #{target_game} expirée (jeu actuel: {current_game}), supprimée")
-            queued_predictions.pop(target_game, None)
+
+        # Les prédictions avec distance > 3 sont conservées dans la file d'attente
+
 
 async def update_prediction_status(game_number: int, new_status: str):
     """Met à jour le message de prédiction dans le canal et son statut interne."""
@@ -221,7 +226,7 @@ async def update_prediction_status(game_number: int, new_status: str):
         pred['status'] = new_status
         logger.info(f"Prédiction #{game_number} mise à jour: {new_status}")
 
-        # Les prédictions terminées sont supprimées du stock actif (pour /vr)
+        # Les prédictions terminées sont supprimées du stock actif (pour faire de la place)
         if new_status in ['✅0️⃣', '✅1️⃣', '❌']:
             del pending_predictions[game_number]
             logger.info(f"Prédiction #{game_number} terminée et supprimée")
@@ -325,7 +330,7 @@ async def process_finalized_message(message_text: str, chat_id: int):
         # --- Envoi des prédictions en file d'attente (si proche) ---
         await check_and_send_queued_predictions(game_number)
 
-        # --- NOUVELLE LOGIQUE DE PRÉDICTION (Paire N et N+1) ---
+        # --- LOGIQUE DE PRÉDICTION (Paire N et N+1) ---
         
         if last_processed_game_data and last_processed_game_data.get('game_number') == game_number - 1:
             
@@ -410,7 +415,7 @@ async def handle_edited_message(event):
 @client.on(events.NewMessage(pattern='/start'))
 async def cmd_start(event):
     if event.is_group or event.is_channel: return
-    await event.respond("🤖 **Bot de Prédiction Baccarat**\n\nCommandes: `/status`, `/help`, `/vr` (Vérification), `/debug`, `/checkchannels`")
+    await event.respond("🤖 **Bot de Prédiction Baccarat**\n\nCommandes: `/status`, `/help`, `/debug`, `/checkchannels`")
 
 @client.on(events.NewMessage(pattern='/status'))
 async def cmd_status(event):
@@ -434,34 +439,10 @@ async def cmd_status(event):
             status_msg += f"• Jeu #{game_num}: {pred['predicted_suit']} (dans {distance} jeux)\n"
     await event.respond(status_msg)
 
-# COMMANDE /vr (Vérification/Résultats) - Montre le stock Actif (pending_predictions)
-@client.on(events.NewMessage(pattern='/vr|/verification_results'))
-async def cmd_vr_status(event):
-    if event.is_group or event.is_channel: return
-    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
-        await event.respond("Commande réservée à l'administrateur")
-        return
-
-    status_msg = f"📊 **Statut des Prédictions Envoyées (Actives):**\n"
-    status_msg += f"🎮 Jeu actuel: #{current_game_number}\n\n"
-
-    if pending_predictions:
-        status_msg += f"**🔮 Actives ({len(pending_predictions)}) envoyées au canal:**\n"
-        # Le tri garantit l'ordre d'affichage
-        for game_num, pred in sorted(pending_predictions.items()):
-            distance = game_num - current_game_number
-            # Les prédictions avec statut final (✅0️⃣, ✅1️⃣, ❌) sont automatiquement supprimées
-            # par update_prediction_status et n'apparaissent donc pas ici.
-            status_msg += f"• Jeu #{game_num}: {pred['suit']} - Base: {pred['base_game']} - Statut: {pred['status']} (dans {distance} jeux)\n"
-    else: 
-        status_msg += "**🔮 Aucune prédiction en attente de vérification (stock vide).**\n"
-
-    await event.respond(status_msg)
-
 @client.on(events.NewMessage(pattern='/help'))
 async def cmd_help(event):
     if event.is_group or event.is_channel: return
-    await event.respond(f"""📖 **Aide - Bot de Prédiction**\n\n**Règle de prédiction (Paire N et N+1):**\n• Condition: L'union des couleurs du premier groupe du jeu **N** et du jeu **N+1** doit avoir **exactement 3 couleurs** (1 manquante).\n• Mapping (Couleur manquante $\\rightarrow$ Prédite) : {SUIT_MAPPING} (Inverse : $\\spadesuit \\leftrightarrow \\clubsuit$ et $\\heartsuit \\leftrightarrow \\diamondsuit$)\n• Prédit: Jeu **N + 6** avec la couleur mappée.\n\n**Maintenance:**\n• Reset Quotidien: Toutes les données sont effacées à **00h59 WAT** pour un redémarrage à zéro.\n• **Reset Horaire**: Toutes les prédictions (actives et en file d'attente) sont effacées toutes les **1 heure** (Filet de sécurité).\n""")
+    await event.respond(f"""📖 **Aide - Bot de Prédiction**\n\n**Règle de prédiction (Paire N et N+1):**\n• Condition: L'union des couleurs du premier groupe du jeu **N** et du jeu **N+1** doit avoir **exactement 3 couleurs** (1 manquante).\n• Mapping (Couleur manquante $\\rightarrow$ Prédite) : {SUIT_MAPPING} (Inverse : $\\spadesuit \\leftrightarrow \\clubsuit$ et $\\heartsuit \\leftrightarrow \\diamondsuit$)\n• Prédit: Jeu **N + 6** avec la couleur mappée.\n\n**Règles de Stockage/Envoi:**\n1. Max **2** prédictions actives à la fois.\n2. Envoi depuis la file d'attente **uniquement** si la distance est de **3 ou 2 jeux**.\n3. Toute prédiction atteignant la distance **1 ou 0** dans la file est **supprimée**.\n\n**Maintenance:**\n• Reset Quotidien: Toutes les données sont effacées à **00h59 WAT** pour un redémarrage à zéro.\n""")
 
 
 # --- Serveur Web et Démarrage ---
@@ -483,29 +464,6 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start() 
-
-async def schedule_hourly_reset():
-    """Tâche planifiée pour la réinitialisation horaire des stocks de prédiction."""
-    logger.info("Tâche de reset horaire démarrée.")
-
-    HOUR_IN_SECONDS = 3600
-
-    while True:
-        logger.info(f"Prochain reset horaire dans 1 heure.")
-        await asyncio.sleep(HOUR_IN_SECONDS)
-
-        logger.warning("🚨 RESET HORAIRE DÉCLENCHÉ!")
-        
-        global pending_predictions, queued_predictions, processed_messages, last_transferred_game, last_processed_game_data
-
-        pending_predictions.clear()
-        queued_predictions.clear()
-        
-        processed_messages.clear()
-        last_transferred_game = None
-        last_processed_game_data = None
-        
-        logger.warning("✅ Données de prédiction (actives et file d'attente) effacées par le reset horaire.")
 
 async def schedule_daily_reset():
     """Tâche planifiée pour la réinitialisation quotidienne des stocks de prédiction à 00h59 WAT."""
@@ -563,9 +521,8 @@ async def main():
             logger.error("Échec du démarrage du bot")
             return
 
-        # Lancement des tâches planifiées en arrière-plan
+        # Lancement de la tâche de reset en arrière-plan
         asyncio.create_task(schedule_daily_reset())
-        asyncio.create_task(schedule_hourly_reset()) 
         
         logger.info("Bot complètement opérationnel - En attente de messages...")
         await client.run_until_disconnected()
