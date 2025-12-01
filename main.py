@@ -56,9 +56,9 @@ last_processed_game_data = None
 MAX_PENDING_PREDICTIONS = 2  # Nombre maximal de prédictions actives
 PROXIMITY_THRESHOLD = 3      # Nombre de jeux avant l'envoi depuis la file d'attente (distance 3 ou 2)
 
-# ATTENTION: PREDICTION_OFFSET est désormais le décalage utilisé pour le backup (+6 après le jeu cible initial)
-# Nous utiliserons 'PREDICTION_DELAY = 5' pour aller de N+1 à N+6
-PREDICTION_OFFSET = 6        
+# ATTENTION: PREDICTION_OFFSET est désormais le décalage utilisé pour le backup (+9 après le jeu cible initial)
+# Nous utiliserons 'PREDICTION_DELAY = 5' pour aller de N+1 à N+9
+PREDICTION_OFFSET = 9        
 
 source_channel_ok = False
 prediction_channel_ok = False
@@ -342,7 +342,7 @@ async def process_finalized_message(message_text: str, chat_id: int):
                 
                 missing_suit_raw = [s for s in ALL_SUITS if s not in combined_suits][0]
                 predicted_suit = get_predicted_suit(missing_suit_raw) 
-                prediction_delay = 5 
+                prediction_delay = 9 
                 target_game = game_number + prediction_delay 
                 
                 if target_game not in pending_predictions and target_game not in queued_predictions:
